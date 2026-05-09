@@ -1,408 +1,278 @@
-YourHub Slime RNG Script
-lua
-Salin
--- YourHub Slime RNG v1.0 | by AI/User 
--- Load: loadstring(game:HttpGet("https://raw.githubusercontent.com/YOURNAME/YourHub/main/YourHub.lua"))()
---[[
-    Catatan:
-    - Versi Delta Android (optimasi mobile)
-    - Kolom kode dipecah sesuai fungsi (Core, Features, UI, dll)
-    - Untuk pembaruan, lihat bagian "Cara Update Remotes"
-]]
+--// YourHub Lite - Slime RNG (Delta Fix Version)
+--// Load: loadstring(game:HttpGet("URL"))()
 
--- Proteksi re-run
+-- =====================
+-- RE-EXECUTE SAFE
+-- =====================
 if getgenv().YourHub then
-    print("[YourHub] Reinisialisasi...")
-    -- Bersihkan koneksi lama
-    if getgenv().YourHub.Cleanup then
-        getgenv().YourHub.Cleanup()
+    if getgenv().YourHub.Stop then
+        getgenv().YourHub.Stop()
     end
 end
--- Singleton guard
+
 getgenv().YourHub = {}
 local Hub = getgenv().YourHub
 
--- Check PlaceId
-local PLACE_ID = 92416421522960
-if game.PlaceId ~= PLACE_ID then
-    warn("[YourHub] Skrip ini hanya untuk Slime RNG.")
+-- =====================
+-- BASIC CHECK
+-- =====================
+if game.PlaceId ~= 92416421522960 then
+    warn("Wrong game")
     return
 end
 
---[[
-SISTEM INTI
-1) Flags & Config
-2) Sistem Cache
-3) Manager Remote
-4) Penjadwal & Koneksi
-5) Utilitas & Logging
-]]
+-- =====================
+-- SERVICES
+-- =====================
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local RS = game:GetService("ReplicatedStorage")
 
--- 1) Flags (tombol ON/OFF dan pengaturan)
+local LP = Players.LocalPlayer
+
+-- =====================
+-- FLAGS (CONTROL)
+-- =====================
 Hub.Flags = {
-    Debug = false,
     AutoFarm = false,
-    AutoFarm_Teleport = false,
-    AutoPotion = false,
-    AutoPotion_Threshold = 0.5,
     AutoRoll = false,
-    AutoRoll_Delay = 1.0,
-    AutoCraft = false,
-    AutoCraft_Slime = nil, -- diisi nama slime target
-    AutoUpgrade = false,
-    AutoUpgrade_Stat = nil,
-    AutoEquipBestPet = false,
-    AutoBuyZone = false,
-    AutoBuyZone_Level = nil,
-    AutoTeleportZone = false,
-    AutoTeleportZone_Level = nil,
+    AutoPotion = false,
     ESP = false,
     Fly = false,
-    Fly_Speed = 50,
     NoClip = false,
-    TeleportToDrop = false,
+
+    RollDelay = 1,
+    FlySpeed = 60,
+    PotionHP = 0.5,
+
+    Debug = true
 }
 
--- Tabel inti
-local Cache = {}
+-- =====================
+-- CONNECTION CLEANER
+-- =====================
+local Conns = {}
+
+function Hub.Stop()
+    for _,c in pairs(Conns) do
+        pcall(function() c:Disconnect() end)
+    end
+    Conns = {}
+end
+
+-- =====================
+-- SIMPLE REMOTE FINDER
+-- =====================
 local Remotes = {}
-local Connections = {}
-local Scheduler = {}
-local Utils = {}
 
--- Fungsi utilitas: pcall untuk Remote
-function Utils:Fire(remote, ...)
-    if not remote then return end
-    local ok, res = pcall(function() return remote:FireServer(...) end)
-    if not ok and Hub.Flags.Debug then
-        warn("[YourHub] Remote.Fire gagal:", res)
-    end
-    return res
-end
-
-function Utils:Invoke(remote, ...)
-    if not remote then return end
-    local ok, res = pcall(function() return remote:InvokeServer(...) end)
-    if not ok and Hub.Flags.Debug then
-        warn("[YourHub] Remote.Invoke gagal:", res)
-    end
-    return res
-end
-
--- Logger / Notifikasi sederhana
-function Utils:Notify(text)
-    -- Saat flag berubah, cetak notifikasi sederhana
-    print("[YourHub] ".. text)
-    -- TODO: Tambah notifikasi GUI minimal (jika perlu)
-end
-
--- Cleanup: matikan semua koneksi dan tugas
-function Hub.Cleanup()
-    for _, conn in pairs(Connections) do
-        if conn then
-            conn:Disconnect()
+local function FindRemote(keyword)
+    for _,v in pairs(RS:GetDescendants()) do
+        if v:IsA("RemoteEvent") or v:IsA("RemoteFunction") then
+            if string.find(v.Name:lower(), keyword) then
+                return v
+            end
         end
     end
-    Connections = {}
-    -- Reset scheduler tasks
-    Scheduler.Tasks = {}
 end
 
--- 2) Sistem Cache
-function Cache:Init()
-    self.Mobs = {}
-    self.Drops = {}
-    self.LastUpdate = 0
-    print("[Cache] Inisialisasi selesai.")
+Remotes.Attack = FindRemote("attack") or FindRemote("damage")
+Remotes.Roll   = FindRemote("roll") or FindRemote("spin")
+Remotes.Potion = FindRemote("potion") or FindRemote("heal")
+
+if Hub.Flags.Debug then
+    print("Attack:", Remotes.Attack)
+    print("Roll:", Remotes.Roll)
+    print("Potion:", Remotes.Potion)
 end
 
-function Cache:Update()
-    -- Update daftar mobs dan drops dalam radius tertentu
-    local radius = 100
-    local player = game.Players.LocalPlayer
-    local char = player.Character
+-- =====================
+-- SAFE FIRE
+-- =====================
+local function Fire(remote, ...)
+    if not remote then return end
+    pcall(function()
+        remote:FireServer(...)
+    end)
+end
+
+-- =====================
+-- FIND NEAREST MOB
+-- =====================
+local function GetNearestMob()
+    local char = LP.Character
     if not char or not char:FindFirstChild("HumanoidRootPart") then return end
+
     local root = char.HumanoidRootPart
-    self.Mobs = {}
-    self.Drops = {}
-    for _, mob in pairs(workspace:FindFirstChild("Mobs") or {}) do
-        if mob:FindFirstChild("HumanoidRootPart") then
-            local dist = (mob.HumanoidRootPart.Position - root.Position).magnitude
-            if dist < radius then
-                table.insert(self.Mobs, mob)
+    local closest, dist = nil, math.huge
+
+    for _,v in pairs(workspace:GetDescendants()) do
+        if v:FindFirstChild("Humanoid") and v ~= char then
+            local hrp = v:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                local d = (hrp.Position - root.Position).Magnitude
+                if d < dist then
+                    dist = d
+                    closest = v
+                end
             end
         end
     end
-    for _, drop in pairs(workspace:FindFirstChild("Drops") or {}) do
-        if drop:FindFirstChild("BasePart") then
-            local dist = (drop.BasePart.Position - root.Position).magnitude
-            if dist < radius then
-                table.insert(self.Drops, drop)
-            end
+
+    return closest
+end
+
+-- =====================
+-- MAIN LOOP (RINGAN)
+-- =====================
+Conns.Main = RunService.Heartbeat:Connect(function()
+    local char = LP.Character
+    if not char then return end
+
+    local hum = char:FindFirstChild("Humanoid")
+    local root = char:FindFirstChild("HumanoidRootPart")
+
+    -- AUTO FARM
+    if Hub.Flags.AutoFarm then
+        local mob = GetNearestMob()
+        if mob and mob:FindFirstChild("HumanoidRootPart") then
+            root.CFrame = mob.HumanoidRootPart.CFrame * CFrame.new(0,0,3)
+            Fire(Remotes.Attack, mob)
         end
     end
-    self.LastUpdate = os.clock()
-end
 
--- 3) Manager Remote
-function Remotes:Init()
-    local RS = game:GetService("ReplicatedStorage")
-    local candidates = {"Attack", "Roll", "BuyZone", "UseItem", "Teleport", "Upgrade", "Craft", "Potion"}
-    for _, name in ipairs(candidates) do
-        local rem = RS:FindFirstChild(name) or RS:FindFirstChild(name.."_Remote")
-        if rem and (rem:IsA("RemoteEvent") or rem:IsA("RemoteFunction")) then
-            self[name] = rem
+    -- AUTO ROLL
+    if Hub.Flags.AutoRoll then
+        if not Hub._lastRoll or tick() - Hub._lastRoll > Hub.Flags.RollDelay then
+            Hub._lastRoll = tick()
+            Fire(Remotes.Roll)
         end
     end
-    print("[Remotes] Inisialisasi selesai.")
-end
 
--- 4) Scheduler & Koneksi
-Scheduler.Tasks = {}
-function Scheduler:AddTask(name, func, interval)
-    self.Tasks[name] = {Func = func, Interval = interval, LastRun = 0}
-end
-function Scheduler:Tick(dt)
-    for name, task in pairs(self.Tasks) do
-        task.LastRun = task.LastRun + dt
-        if task.LastRun >= task.Interval then
-            task.LastRun = 0
-            local ok, err = pcall(task.Func)
-            if not ok and Hub.Flags.Debug then
-                warn("[Scheduler] task '"..name.."' gagal: "..tostring(err))
-            end
+    -- AUTO POTION
+    if Hub.Flags.AutoPotion and hum then
+        if hum.Health / hum.MaxHealth < Hub.Flags.PotionHP then
+            Fire(Remotes.Potion)
         end
     end
-end
 
--- Koneksi utama ke RunService Heartbeat
-Connections.Heartbeat = game:GetService("RunService").Heartbeat:Connect(function(dt)
-    Scheduler:Tick(dt)
-    if os.clock() - (Cache.LastUpdate or 0) > 1 then
-        Cache:Update()
-    end
-end)
-
--- 5) Utilitas tambahan (helper)
-function Utils:ShortestName(obj)
-    if not obj then return "nil" end
-    return obj.Name
-end
-
--- Inisialisasi core systems
-Cache:Init()
-Remotes:Init()
-
---[[
-FITUR-FITUR
-Setiap fitur diikat ke Scheduler dan Flags
-]]
-
--- AutoFarm: serang mob terdekat & teleport (opsional)
-local function AutoFarm_Tick()
-    if not Hub.Flags.AutoFarm then return end
-    local mobs = Cache.Mobs
-    if #mobs == 0 then return end
-    table.sort(mobs, function(a,b)
-        local pa = a.HumanoidRootPart.Position
-        local pb = b.HumanoidRootPart.Position
-        local root = game.Players.LocalPlayer.Character.HumanoidRootPart.Position
-        return (pa - root).magnitude < (pb - root).magnitude
-    end)
-    local target = mobs[1]
-    if target and target:FindFirstChild("HumanoidRootPart") then
-        if Hub.Flags.AutoFarm_Teleport then
-            game.Players.LocalPlayer.Character:MoveTo(target.HumanoidRootPart.Position)
-        end
-        Utils:Fire(Remotes.Attack, target)
-    end
-end
-Scheduler:AddTask("AutoFarm", AutoFarm_Tick, 0.5)
-
--- AutoRoll: gulung dengan delay
-local function AutoRoll_Tick()
-    if not Hub.Flags.AutoRoll then return end
-    if os.clock() - (Hub.LastRoll or 0) < Hub.Flags.AutoRoll_Delay then return end
-    Hub.LastRoll = os.clock()
-    Utils:Fire(Remotes.Roll)
-end
-Scheduler:AddTask("AutoRoll", AutoRoll_Tick, 0.1)
-
--- AutoPotion: gunakan potion saat HP rendah
-local function AutoPotion_Tick()
-    if not Hub.Flags.AutoPotion then return end
-    local plr = game.Players.LocalPlayer
-    local char = plr.Character
-    if not char or not char:FindFirstChild("Humanoid") then return end
-    local hpRatio = char.Humanoid.Health / char.Humanoid.MaxHealth
-    if hpRatio < Hub.Flags.AutoPotion_Threshold then
-        Utils:Fire(Remotes.Potion)
-    end
-end
-Scheduler:AddTask("AutoPotion", AutoPotion_Tick, 0.5)
-
--- Tambah fitur lain seperti AutoCraft, AutoUpgrade, AutoEquipBestPet, AutoBuyZone, AutoTeleportZone, Teleport ke Drop
--- Contoh implementasi sederhana:
-local function AutoCraft_Tick()
-    if not Hub.Flags.AutoCraft or not Hub.Flags.AutoCraft_Slime then return end
-    Utils:Fire(Remotes.Craft, Hub.Flags.AutoCraft_Slime)
-end
-Scheduler:AddTask("AutoCraft", AutoCraft_Tick, 1.0)
-
--- NoClip: matikan tabrakan part karakter
-local function NoClip_Tick()
+    -- NOCLIP
     if Hub.Flags.NoClip then
-        local char = game.Players.LocalPlayer.Character
-        if char then
-            for _, part in ipairs(char:GetChildren()) do
-                if part:IsA("BasePart") then
-                    part.CanCollide = false
-                end
+        for _,v in pairs(char:GetDescendants()) do
+            if v:IsA("BasePart") then
+                v.CanCollide = false
             end
         end
     end
-end
-Scheduler:AddTask("NoClip", NoClip_Tick, 0.2)
 
--- Fly: tambahkan BodyVelocity pada HumanoidRootPart
-local bodyVel = nil
-local function Fly_Tick()
-    local plr = game.Players.LocalPlayer
-    local char = plr.Character
-    if Hub.Flags.Fly and char and char:FindFirstChild("HumanoidRootPart") then
-        if not bodyVel then
-            bodyVel = Instance.new("BodyVelocity")
-            bodyVel.MaxForce = Vector3.new(0,0,0)
-            bodyVel.Parent = char.HumanoidRootPart
+    -- FLY
+    if Hub.Flags.Fly and root then
+        if not root:FindFirstChild("FlyVel") then
+            local bv = Instance.new("BodyVelocity")
+            bv.Name = "FlyVel"
+            bv.MaxForce = Vector3.new(1e5,1e5,1e5)
+            bv.Parent = root
         end
-        bodyVel.MaxForce = Vector3.new(1e5,1e5,1e5)
-        bodyVel.Velocity = char.HumanoidRootPart.CFrame.LookVector * Hub.Flags.Fly_Speed
+        root.FlyVel.Velocity = root.CFrame.LookVector * Hub.Flags.FlySpeed
     else
-        if bodyVel then
-            bodyVel:Destroy()
-            bodyVel = nil
+        if root and root:FindFirstChild("FlyVel") then
+            root.FlyVel:Destroy()
         end
     end
-end
-Scheduler:AddTask("Fly", Fly_Tick, 0.1)
+end)
 
--- ESP: buat BillboardGui sederhana untuk mobs & drops
-local function ESP_CreateLabel(obj, text)
-    if not obj or not obj:IsA("Model") then return end
-    if obj:FindFirstChild("YourHubESP") then return end
+-- =====================
+-- SIMPLE ESP (RINGAN)
+-- =====================
+local function CreateESP(obj)
+    if obj:FindFirstChild("ESP") then return end
+
     local bill = Instance.new("BillboardGui")
-    bill.Name = "YourHubESP"
-    bill.Adornee = obj:FindFirstChild("HumanoidRootPart") or obj:FindFirstChild("BasePart")
+    bill.Name = "ESP"
     bill.Size = UDim2.new(0,100,0,30)
-    bill.StudsOffset = Vector3.new(0,3,0)
     bill.AlwaysOnTop = true
-    local label = Instance.new("TextLabel", bill)
-    label.Size = UDim2.new(1,0,1,0)
-    label.BackgroundTransparency = 1
-    label.TextColor3 = Color3.new(1,1,0)
-    label.Text = text or "ESP"
-    label.TextScaled = true
-    bill.Parent = obj
+
+    local txt = Instance.new("TextLabel", bill)
+    txt.Size = UDim2.new(1,0,1,0)
+    txt.BackgroundTransparency = 1
+    txt.Text = obj.Name
+    txt.TextScaled = true
+    txt.TextColor3 = Color3.fromRGB(255,255,0)
+
+    bill.Parent = obj:FindFirstChild("HumanoidRootPart") or obj
 end
 
-local function ESP_Tick()
-    if Hub.Flags.ESP then
-        for _, mob in pairs(Cache.Mobs) do
-            if mob and mob:FindFirstChild("HumanoidRootPart") then
-                if not mob:FindFirstChild("YourHubESP") then
-                    ESP_CreateLabel(mob, mob.Name)
+task.spawn(function()
+    while true do
+        task.wait(1)
+
+        if Hub.Flags.ESP then
+            for _,v in pairs(workspace:GetDescendants()) do
+                if v:FindFirstChild("Humanoid") then
+                    CreateESP(v)
                 end
             end
-        end
-        for _, drop in pairs(Cache.Drops) do
-            if drop and drop:FindFirstChild("BasePart") then
-                if not drop:FindFirstChild("YourHubESP") then
-                    ESP_CreateLabel(drop, drop.Name)
+        else
+            for _,v in pairs(workspace:GetDescendants()) do
+                if v:FindFirstChild("ESP") then
+                    v.ESP:Destroy()
                 end
             end
-        end
-    else
-        -- Jika ESP dimatikan, hapus semua label
-        for _, mob in pairs(Cache.Mobs) do
-            if mob:FindFirstChild("YourHubESP") then mob.YourHubESP:Destroy() end
-        end
-        for _, drop in pairs(Cache.Drops) do
-            if drop:FindFirstChild("YourHubESP") then drop.YourHubESP:Destroy() end
         end
     end
-end
-Scheduler:AddTask("ESP", ESP_Tick, 0.5)
+end)
 
---[[
-USER INTERFACE (mobile friendly, tema gelap ungu)
-]]
-local ui = Instance.new("ScreenGui")
-ui.Name = "YourHubUI"
-ui.Parent = game:GetService("CoreGui")
+-- =====================
+-- SIMPLE GUI (MOBILE)
+-- =====================
+local gui = Instance.new("ScreenGui", game.CoreGui)
+local frame = Instance.new("Frame", gui)
 
-local frame = Instance.new("Frame", ui)
-frame.Name = "MainFrame"
-frame.AnchorPoint = Vector2.new(0.5,0.5)
-frame.Position = UDim2.new(0.5, 0.5)
-frame.Size = UDim2.new(0, 300, 0, 400)
-frame.BackgroundColor3 = Color3.fromRGB(30,30,40)
+frame.Size = UDim2.new(0,250,0,300)
+frame.Position = UDim2.new(0,20,0,100)
+frame.BackgroundColor3 = Color3.fromRGB(25,25,35)
 frame.Active = true
-local corner = Instance.new("UICorner", frame)
-corner.CornerRadius = UDim.new(0, 8)
+frame.Draggable = true
 
-local title = Instance.new("TextLabel", frame)
-title.Text = "YourHub - Slime RNG"
-title.Font = Enum.Font.SourceSansBold
-title.TextSize = 20
-title.TextColor3 = Color3.fromRGB(200, 200, 255)
-title.BackgroundTransparency = 1
-title.Size = UDim2.new(1, 0, 0, 30)
+local function Button(name, y, callback)
+    local b = Instance.new("TextButton", frame)
+    b.Size = UDim2.new(1,-10,0,30)
+    b.Position = UDim2.new(0,5,0,y)
+    b.Text = name .. ": OFF"
+    b.BackgroundColor3 = Color3.fromRGB(40,40,60)
 
--- Kontainer Tab (Farm, Items, Pets, World, Visual, Movement)
-local tabNames = {"Farm", "Items", "Pets", "World", "Visual", "Movement"}
-local buttons = {}
-for i,name in ipairs(tabNames) do
-    local btn = Instance.new("TextButton", frame)
-    btn.Text = name
-    btn.Position = UDim2.new((i-1)/#tabNames, 0, 0, 30)
-    btn.Size = UDim2.new(1/#tabNames, 0, 0, 25)
-    btn.TextColor3 = Color3.new(1,1,1)
-    btn.BackgroundColor3 = Color3.fromRGB(50,50,60)
-    buttons[i] = btn
-    -- Ketika tombol diklik: tampilkan tab (implementasikan toggle tampilan)
-    btn.MouseButton1Click:Connect(function()
-        -- TODO: tampilkan panel tab sesuai pilihan
+    b.MouseButton1Click:Connect(function()
+        callback(b)
     end)
 end
 
--- Contoh toggle di tab "Farm"
-local autoFarmToggle = Instance.new("TextButton", frame)
-autoFarmToggle.Text = "AutoFarm: OFF"
-autoFarmToggle.Size = UDim2.new(0, 280, 0, 30)
-autoFarmToggle.Position = UDim2.new(0, 10, 0, 60)
-autoFarmToggle.BackgroundColor3 = Color3.fromRGB(60,60,80)
-autoFarmToggle.TextColor3 = Color3.new(1,1,1)
-autoFarmToggle.MouseButton1Click:Connect(function()
+Button("AutoFarm", 10, function(b)
     Hub.Flags.AutoFarm = not Hub.Flags.AutoFarm
-    autoFarmToggle.Text = "AutoFarm: " .. (Hub.Flags.AutoFarm and "ON" or "OFF")
-    Utils:Notify("AutoFarm " .. (Hub.Flags.AutoFarm and "Enabled" or "Disabled"))
+    b.Text = "AutoFarm: " .. (Hub.Flags.AutoFarm and "ON" or "OFF")
 end)
 
--- (Tambahkan Slider, Dropdown, Button, dsb. di setiap tab sesuai fitur)
+Button("AutoRoll", 50, function(b)
+    Hub.Flags.AutoRoll = not Hub.Flags.AutoRoll
+    b.Text = "AutoRoll: " .. (Hub.Flags.AutoRoll and "ON" or "OFF")
+end)
 
---[[
-Cara Update Remotes:
-Jika remote di Slime RNG berubah nama, buka bagian "Remotes:Init" di script dan tambahkan nama baru di daftar candidates.
-Cek di ReplicatedStorage untuk nama remote terbaru.
+Button("AutoPotion", 90, function(b)
+    Hub.Flags.AutoPotion = not Hub.Flags.AutoPotion
+    b.Text = "AutoPotion: " .. (Hub.Flags.AutoPotion and "ON" or "OFF")
+end)
 
-Troubleshooting Delta Android:
-- Jika GUI tidak muncul, tunggu beberapa detik setelah game load (atau gunakan delay).
-- Jika tombol UI tidak responsif, cek ukuran dan Active property frame.
-- Pastikan RemoteEvent/RemoteFunction benar (aktifkan Debug jika perlu).
-]]
+Button("ESP", 130, function(b)
+    Hub.Flags.ESP = not Hub.Flags.ESP
+    b.Text = "ESP: " .. (Hub.Flags.ESP and "ON" or "OFF")
+end)
 
---- Instruksi Commit GitHub ---
+Button("Fly", 170, function(b)
+    Hub.Flags.Fly = not Hub.Flags.Fly
+    b.Text = "Fly: " .. (Hub.Flags.Fly and "ON" or "OFF")
+end)
 
-Salin blok kode di atas ke YourHub.lua di repository Anda.
-Lakukan commit dengan pesan: "Updated YourHub for Slime RNG v1.0".
-Uji di Delta: loadstring(URL) untuk memuat dan menjalankan.
+Button("NoClip", 210, function(b)
+    Hub.Flags.NoClip = not Hub.Flags.NoClip
+    b.Text = "NoClip: " .. (Hub.Flags.NoClip and "ON" or "OFF")
+end)
+
+print("YourHub Loaded (Fixed Version)")
